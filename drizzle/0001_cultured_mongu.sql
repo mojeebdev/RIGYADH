@@ -1,0 +1,2 @@
+ALTER TABLE "operator_slots" ADD CONSTRAINT "operator_slots_number_range" CHECK ("number" BETWEEN 1 AND 5555);--> statement-breakpoint
+ALTER TABLE "operators" ADD CONSTRAINT "operators_number_range" CHECK ("number" BETWEEN 1 AND 5555);

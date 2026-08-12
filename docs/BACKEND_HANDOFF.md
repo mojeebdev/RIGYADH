@@ -1,44 +1,47 @@
 # RIGYADH backend handoff
 
-Preserve the current gameplay and visual behavior while replacing simulated identity and leaderboard state.
+## Architecture
 
-## Approved identity flow
+Neon Auth owns the neon_auth schema and its Google/email identity records. RIGYADH owns the Drizzle-managed application tables:
 
-1. Anyone can play practice without authentication.
-2. A player signs in with Google or email magic link to claim ranked access.
-3. The server atomically assigns one available number from `0001–5555`.
-4. The authenticated user chooses one unique Field Alias.
-5. The optional wallet-link action is available from the profile only.
-6. One auth user can own only one Operator ID. Operator numbers cannot be rerolled.
+- operator_slots: the immutable range 1–5555
+- operators and operator_claims
+- daily_fields
+- ranked_run_sessions and ranked_runs
+- wallet_challenges
+- rate_limit_events
 
-## Suggested tables
+No Auth.js tables or credentials are used.
 
-`operators`: UUID primary key, unique auth user ID, unique Operator number constrained to 1–5555, unique 16-character Field Alias, optional X handle, optional unique wallet, wallet verification time, creation time.
+## API
 
-`daily_fields`: UUID primary key, unique field date, seed hash, start and end times.
+| Route | Purpose |
+| --- | --- |
+| GET /api/field/today | Public current-field metadata |
+| POST /api/operators/reserve | Authenticated 15-minute random slot reservation |
+| POST /api/operators/claim | Authenticated permanent operator claim |
+| GET /api/operators/me | Current operator profile |
+| POST /api/operators/wallet/challenge | Creates a ten-minute wallet signature challenge |
+| POST /api/operators/wallet/verify | Verifies the challenge signature and stores checksummed address |
+| POST /api/runs/start | Starts one signed, 45-second ranked session |
+| POST /api/runs/submit | Replays timestamped actions and stores the verified result |
+| GET /api/leaderboard?field=today | Current daily leaderboard |
 
-`ranked_runs`: Operator and daily-field foreign keys, depth, banked reserve, best combo, JSON input log, verification status, creation time.
+POST routes require same-origin requests and an authenticated Neon session. Rate-limit events live in Postgres and are protected with an advisory lock per bucket/key.
 
-`operator_claims`: unique auth user ID, unique reserved number, expiry time, completion time.
+## Ranked integrity
 
-## Required API boundaries
+The browser receives a signed, short-lived session token plus a field seed. It submits only timestamped actions; it never submits final depth or reserve values. The server rejects altered, expired, or duplicate sessions; action bursts below 80ms; invalid checkpoint commands; and action logs that cannot be replayed with the shared deterministic rules.
 
-- `GET /api/field/today`
-- `POST /api/operators/reserve`
-- `POST /api/operators/claim`
-- `GET /api/operators/me`
-- `POST /api/operators/wallet/challenge`
-- `POST /api/operators/wallet/verify`
-- `POST /api/runs/start`
-- `POST /api/runs/submit`
-- `GET /api/leaderboard?field=today`
+Each started ranked session counts toward the daily maximum of three attempts. Practice remains local, unlimited, and unranked.
 
-## Security and integrity requirements
+## Production checklist
 
-- Use a transaction or row-level lock when allocating an Operator number.
-- Do not accept browser-calculated scores as authoritative.
-- Issue a signed run token and replay timestamped drill inputs server-side.
-- Rate-limit magic-link, claim, run-start, and run-submit endpoints.
-- Validate Cloudflare Turnstile server-side during claim.
-- Allow three ranked attempts per Operator per daily field; keep practice unlimited.
-- Never award attempts or points for likes, follows, replies, or reposts on X.
+1. Put production values in Vercel: DATABASE_URL, NEON_AUTH_BASE_URL, NEON_AUTH_COOKIE_SECRET, RUN_TOKEN_SECRET, NEXT_PUBLIC_APP_URL=https://rigyadh.buzz, and WALLET_CHALLENGE_DOMAIN=rigyadh.buzz.
+2. In Neon Auth, allow https://rigyadh.buzz; use http://localhost:3000 only in development.
+3. Run migrations and seed against a Neon development branch first.
+4. Create the production Neon branch/database, migrate it, then run npm run db:seed.
+5. Use Neon’s managed Google/email configuration. Move off shared Google keys before public launch.
+6. Run npm run lint, npm run typecheck, npm test, and npm run build before each release.
+
+Wallet linking proves address control through a signed message only. Do not add transaction, approval, payment, or token-transfer code to this flow.
