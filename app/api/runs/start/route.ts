@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/db";
@@ -33,6 +33,7 @@ export async function POST(request: NextRequest) {
     if (attemptNumber > 3) return jsonError("All three ranked attempts are used for today.", 409, "ATTEMPTS_EXHAUSTED");
 
     const sessionId = randomUUID();
+    const runSeed = createHmac("sha256", field.seed).update(sessionId).digest("hex");
     const startedAt = new Date();
     const expiresAt = new Date(startedAt.getTime() + 90_000);
     const token = createRunToken({
@@ -47,7 +48,7 @@ export async function POST(request: NextRequest) {
       operatorId: operator.id,
       dailyFieldId: field.id,
       attemptNumber,
-      seed: field.seed,
+      seed: runSeed,
       tokenHash: hashRunToken(token),
       startedAt,
       expiresAt,
@@ -56,8 +57,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       run: {
         token,
-        seed: field.seed,
+        seed: runSeed,
         attemptNumber,
+        attemptsRemaining: 3 - attemptNumber,
         startsAt: startedAt,
         expiresAt,
         durationMs: 45_000,

@@ -16,6 +16,11 @@ function fieldSecret() {
 export async function getTodayField(now = new Date()) {
   const db = getDb();
   const fieldDate = currentFieldDate(now);
+  const [existing] = await db.select().from(dailyFields)
+    .where(eq(dailyFields.fieldDate, fieldDate))
+    .limit(1);
+  if (existing) return existing;
+
   const opensAt = new Date(fieldDate + "T00:00:00.000Z");
   const closesAt = new Date(opensAt.getTime() + 24 * 60 * 60 * 1000);
   const seed = createHmac("sha256", fieldSecret()).update(fieldDate).digest("hex");

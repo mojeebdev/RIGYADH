@@ -1,21 +1,26 @@
-import { NextRequest, NextResponse } from "next/server";
+import { sql } from "drizzle-orm";
+import { NextResponse } from "next/server";
+import { getDb } from "@/db";
+import { operators } from "@/db/schema";
 import { getTodayField } from "@/lib/daily-field";
-import { clientKey, jsonError } from "@/lib/http";
-import { enforceRateLimit } from "@/lib/rate-limit";
+import { jsonError } from "@/lib/http";
 
 export const runtime = "nodejs";
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
-    await enforceRateLimit({ bucket: "field-today", key: clientKey(request), limit: 120, windowSeconds: 60 });
-    const field = await getTodayField();
+    const [field, claimed] = await Promise.all([
+      getTodayField(),
+      getDb().select({ count: sql<number>`count(*)::int` }).from(operators),
+    ]);
     return NextResponse.json({
       field: {
         date: field.fieldDate,
         opensAt: field.opensAt,
         closesAt: field.closesAt,
+        claimedCount: claimed[0]?.count ?? 0,
       },
-    });
+    }, { headers: { "Cache-Control": "public, s-maxage=30, stale-while-revalidate=120" } });
   } catch {
     return jsonError("Today's field is unavailable.", 503, "SERVICE_UNAVAILABLE");
   }
