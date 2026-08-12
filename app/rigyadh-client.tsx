@@ -1,10 +1,12 @@
 "use client";
 
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { authClient } from "@/lib/auth/client";
 
 type Phase = "idle" | "playing" | "checkpoint" | "ended";
 type AuthStep = "options" | "email" | "sent" | "alias" | "claimed";
 type Flash = "success" | "miss" | "";
+type RunMode = "practice" | "ranked";
 
 type RunStats = {
   depth: number;
@@ -28,13 +30,21 @@ const EMPTY_RUN: RunStats = {
   strikes: 0,
 };
 
-const LEADERS = [
-  { rank: "01", operator: "#3606", alias: "NIGHTFALCON", depth: "6,840m", reserve: "28,420" },
-  { rank: "02", operator: "#1102", alias: "SANDSIGNAL", depth: "6,510m", reserve: "26,880" },
-  { rank: "03", operator: "#5551", alias: "GREENWATCH", depth: "6,240m", reserve: "24,910" },
-  { rank: "04", operator: "#2839", alias: "DEEPFIELD", depth: "5,960m", reserve: "22,740" },
-  { rank: "05", operator: "#0417", alias: "DESERTMO", depth: "5,720m", reserve: "21,330" },
-];
+type Leader = { rank: number; operator: string; alias: string; depth: number; reserve: number };
+
+function seededRandom(seed: string) {
+  let value = 1779033703 ^ seed.length;
+  for (let index = 0; index < seed.length; index += 1) {
+    value = Math.imul(value ^ seed.charCodeAt(index), 3432918353);
+    value = (value << 13) | (value >>> 19);
+  }
+  return () => {
+    value = Math.imul(value ^ (value >>> 16), 2246822507);
+    value = Math.imul(value ^ (value >>> 13), 3266489909);
+    value ^= value >>> 16;
+    return (value >>> 0) / 4294967296;
+  };
+}
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(value)));
@@ -71,8 +81,27 @@ export default function RigyadhClient() {
   const [operator, setOperator] = useState<{ number: string; alias: string } | null>(null);
   const [walletLinked, setWalletLinked] = useState(false);
   const [toast, setToast] = useState("");
+  const [runMode, setRunMode] = useState<RunMode>("practice");
+  const [leaders, setLeaders] = useState<Leader[]>([]);
+  const [leaderboardState, setLeaderboardState] = useState<"loading" | "ready" | "empty" | "error">("loading");
   const checkpointDepth = useRef(1000);
   const statsRef = useRef(stats);
+  const runStartedAt = useRef(0);
+  const randomRef = useRef<() => number>(Math.random);
+  const rankedSessionRef = useRef<{ token: string; startedAt: number } | null>(null);
+  const rankedActionsRef = useRef<{ type: "drill" | "bank" | "max"; atMs: number }[]>([]);
+
+  const loadLeaderboard = async () => {
+    try {
+      const response = await fetch("/api/leaderboard?field=today");
+      if (!response.ok) throw new Error("Leaderboard unavailable");
+      const payload = await response.json() as { leaders: Leader[] };
+      setLeaders(payload.leaders);
+      setLeaderboardState(payload.leaders.length ? "ready" : "empty");
+    } catch {
+      setLeaderboardState("error");
+    }
+  };
 
   useEffect(() => { statsRef.current = stats; }, [stats]);
   useEffect(() => { targetRef.current = target; }, [target]);
@@ -93,6 +122,24 @@ export default function RigyadhClient() {
           setStats((run) => ({ ...run, banked: run.banked + run.unbanked, unbanked: 0 }));
           setFeedback("SHIFT COMPLETE // RESERVES SECURED");
           setPhase("ended");
+          const rankedSession = rankedSessionRef.current;
+          if (rankedSession) {
+            void fetch("/api/runs/submit", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ token: rankedSession.token, actions: rankedActionsRef.current }),
+            }).then(async (response) => {
+              if (response.ok) {
+                setToast("RANKED FIELD REPORT VERIFIED");
+                void loadLeaderboard();
+              } else {
+                const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+                setToast(payload?.error?.message ?? "RANKED REPORT REJECTED");
+              }
+            }).finally(() => {
+              rankedSessionRef.current = null;
+            });
+          }
         }
         return next;
       });
@@ -105,7 +152,7 @@ export default function RigyadhClient() {
     let frame = 0;
     const draw = (now: number) => {
       const speed = 0.00052 + statsRef.current.multiplier * 0.00008;
-      const wave = (Math.sin(now * speed * Math.PI * 2) + 1) / 2;
+      const wave = (Math.sin((now - runStartedAt.current) * speed * Math.PI * 2) + 1) / 2;
       needleRef.current = wave;
       setNeedle(wave);
       frame = window.requestAnimationFrame(draw);
@@ -136,9 +183,27 @@ export default function RigyadhClient() {
     }
   };
 
-  const startRun = () => {
+  const startRun = async () => {
+    let seed: string | null = null;
+    if (runMode === "ranked") {
+      const response = await fetch("/api/runs/start", { method: "POST" });
+      const payload = await response.json().catch(() => null) as { run?: { token: string; seed: string; attemptNumber: number }; error?: { message?: string } } | null;
+      if (!response.ok || !payload?.run) {
+        setToast(payload?.error?.message ?? "RANKED FIELD UNAVAILABLE");
+        return;
+      }
+      seed = payload.run.seed;
+      rankedSessionRef.current = { token: payload.run.token, startedAt: performance.now() };
+      rankedActionsRef.current = [];
+      setToast("RANKED ATTEMPT " + payload.run.attemptNumber + " OF 3");
+    } else {
+      rankedSessionRef.current = null;
+      rankedActionsRef.current = [];
+    }
     setStats(EMPTY_RUN);
     statsRef.current = EMPTY_RUN;
+    runStartedAt.current = performance.now();
+    randomRef.current = seed ? seededRandom(seed) : Math.random;
     setTimeLeft(45);
     setTarget({ start: 0.36, width: 0.2 });
     checkpointDepth.current = 1000;
@@ -155,6 +220,9 @@ export default function RigyadhClient() {
 
   const drill = () => {
     if (phase !== "playing") return;
+    if (rankedSessionRef.current) {
+      rankedActionsRef.current.push({ type: "drill", atMs: Math.round(performance.now() - rankedSessionRef.current.startedAt) });
+    }
     const position = needleRef.current;
     const zone = targetRef.current;
     const hit = position >= zone.start && position <= zone.start + zone.width;
@@ -188,7 +256,7 @@ export default function RigyadhClient() {
         return next;
       });
       const nextWidth = Math.max(0.075, zone.width - 0.007);
-      const nextStart = 0.08 + Math.random() * (0.84 - nextWidth);
+      const nextStart = 0.08 + randomRef.current() * (0.84 - nextWidth);
       setTarget({ start: nextStart, width: nextWidth });
     } else {
       setFlash("miss");
@@ -210,12 +278,18 @@ export default function RigyadhClient() {
   };
 
   const bankReserve = () => {
+    if (rankedSessionRef.current) {
+      rankedActionsRef.current.push({ type: "bank", atMs: Math.round(performance.now() - rankedSessionRef.current.startedAt) });
+    }
     setStats((run) => ({ ...run, banked: run.banked + run.unbanked, unbanked: 0 }));
     setFeedback("RESERVES BANKED // DRILLING RESUMED");
     setPhase("playing");
   };
 
   const maxDrill = () => {
+    if (rankedSessionRef.current) {
+      rankedActionsRef.current.push({ type: "max", atMs: Math.round(performance.now() - rankedSessionRef.current.startedAt) });
+    }
     setStats((run) => ({ ...run, multiplier: Math.min(4, run.multiplier + 0.5) }));
     setTarget((zone) => ({ ...zone, width: Math.max(0.065, zone.width - 0.02) }));
     setFeedback("MAX DRILL ENGAGED // PRESSURE RISING");
@@ -244,25 +318,89 @@ export default function RigyadhClient() {
     setToast("FIELD REPORT COPIED");
   };
 
-  const openClaim = () => {
-    setAuthStep(operator ? "claimed" : "options");
+  const refreshOperator = async () => {
+    const response = await fetch("/api/operators/me");
+    if (!response.ok) return null;
+    const payload = await response.json() as { operator: { number: number; fieldAlias: string; walletAddress?: string | null } | null };
+    if (!payload.operator) return null;
+    const nextOperator = { number: String(payload.operator.number).padStart(4, "0"), alias: payload.operator.fieldAlias };
+    setOperator(nextOperator);
+    setWalletLinked(Boolean(payload.operator.walletAddress));
+    return nextOperator;
+  };
+
+  const openClaim = async () => {
+    const existing = await refreshOperator();
+    if (existing) {
+      setAuthStep("claimed");
+      setClaimOpen(true);
+      return;
+    }
+    const reservation = await fetch("/api/operators/reserve", { method: "POST" });
+    if (reservation.status === 401) {
+      setAuthStep("options");
+      setClaimOpen(true);
+      return;
+    }
+    if (!reservation.ok) {
+      const payload = await reservation.json().catch(() => null) as { error?: { message?: string } } | null;
+      setToast(payload?.error?.message ?? "OPERATOR RESERVATION UNAVAILABLE");
+      return;
+    }
+    setAuthStep("alias");
     setClaimOpen(true);
   };
 
-  const sendMagicLink = (event: FormEvent) => {
+  const sendMagicLink = async (event: FormEvent) => {
     event.preventDefault();
     if (!email.trim()) return;
+    const { error } = await authClient.signIn.magicLink({
+      email: email.trim(),
+      callbackURL: window.location.origin,
+    });
+    if (error) {
+      setToast("MAGIC LINK COULD NOT BE SENT");
+      return;
+    }
     setAuthStep("sent");
   };
 
-  const completeClaim = (event: FormEvent) => {
+  const completeClaim = async (event: FormEvent) => {
     event.preventDefault();
     const cleaned = alias.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "").slice(0, 16);
     if (cleaned.length < 3) return;
-    setOperator({ number: "0417", alias: cleaned });
+    const response = await fetch("/api/operators/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ alias: cleaned }),
+    });
+    const payload = await response.json().catch(() => null) as { operator?: { number: number; fieldAlias: string }; error?: { message?: string } } | null;
+    if (!response.ok || !payload?.operator) {
+      setToast(payload?.error?.message ?? "FIELD ALIAS UNAVAILABLE");
+      return;
+    }
+    const claimed = { number: String(payload.operator.number).padStart(4, "0"), alias: payload.operator.fieldAlias };
+    setOperator(claimed);
     setAuthStep("claimed");
-    setToast("OPERATOR #0417 IS ONLINE");
+    setToast("OPERATOR #" + claimed.number + " IS ONLINE");
+    void loadLeaderboard();
   };
+
+  const continueWithGoogle = async () => {
+    const { error } = await authClient.signIn.social({
+      provider: "google",
+      callbackURL: window.location.origin,
+    });
+    if (error) setToast("GOOGLE SIGN-IN UNAVAILABLE");
+  };
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void refreshOperator();
+      void loadLeaderboard();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   return (
     <main className={`site-shell ${flash ? `is-${flash}` : ""}`}>
@@ -275,7 +413,7 @@ export default function RigyadhClient() {
           <a href="#game">Practice</a><a href="#leaderboard">Field board</a><a href="#profile">Operator</a>
         </nav>
         <button className="status-button" onClick={openClaim}>
-          <span className="status-light" />{operator ? `#${operator.number}` : "0 / 5,555 ONLINE"}
+          <span className="status-light" />{operator ? `#${operator.number}` : "RANKED ACCESS"}
         </button>
       </header>
 
@@ -317,7 +455,7 @@ export default function RigyadhClient() {
         <div className="game-layout">
           <div className="game-terminal" tabIndex={0} onKeyDown={handleGameKey} aria-label="RIGYADH drilling game. Use space or enter to drill.">
             <div className="terminal-bar">
-              <span><i className={phase === "playing" ? "live" : ""} /> FIELD SIMULATION</span>
+              <span><i className={phase === "playing" ? "live" : ""} /> {runMode === "ranked" ? "RANKED FIELD" : "FIELD SIMULATION"}</span>
               <div><span>SEED: RYD-0812</span><button onClick={() => setSoundOn((value) => !value)} aria-label={soundOn ? "Mute sound" : "Enable sound"}><Icon name="sound" /> {soundOn ? "ON" : "OFF"}</button></div>
             </div>
             <div className="telemetry-row">
@@ -339,7 +477,7 @@ export default function RigyadhClient() {
                 <div className="integrity-line"><span>RIG INTEGRITY</span><div><i style={{ width: `${stats.integrity}%` }} /></div><strong>{stats.integrity}%</strong></div>
                 <p className={`field-feedback ${flash}`}>{feedback}</p>
 
-                {phase === "idle" && <div className="game-overlay"><p>DAILY FIELD // PRACTICE</p><h3>Find the signal beneath the sand.</h3><button className="primary-button" onClick={startRun}>Start drilling <Icon name="arrow" /></button><small>Tap, click, SPACE or ENTER</small></div>}
+                {phase === "idle" && <div className="game-overlay"><p>DAILY FIELD // {runMode.toUpperCase()}</p><h3>Find the signal beneath the sand.</h3><button className="primary-button" onClick={startRun}>{runMode === "ranked" ? "Start ranked run" : "Start drilling"} <Icon name="arrow" /></button><button className="text-button" onClick={() => setRunMode((mode) => mode === "practice" ? "ranked" : "practice")}>{runMode === "practice" ? "Enter ranked play" : "Return to practice"} <span>↗</span></button><small>{runMode === "ranked" ? "Three verified attempts per daily field." : "Tap, click, SPACE or ENTER"}</small></div>}
                 {phase === "checkpoint" && <div className="game-overlay checkpoint-overlay"><p>RESERVE POCKET // {formatNumber(stats.unbanked)} UNBANKED</p><h3>Secure it, or risk the field.</h3><div><button className="secondary-button" onClick={bankReserve}>Bank reserve</button><button className="danger-button" onClick={maxDrill}>MAX DRILL</button></div><small>MAX DRILL increases output and narrows the pressure window.</small></div>}
                 {phase === "ended" && <div className="game-overlay result-overlay"><p>FIELD REPORT // RUN COMPLETE</p><h3>{formatNumber(stats.depth)}M DEEP</h3><div className="result-pair"><span><small>RESERVE</small>{formatNumber(totalReserve)}</span><span><small>EST. RANK</small>#{formatNumber(estimatedRank)}</span></div><div className="result-actions"><button className="primary-button" onClick={shareResult}><Icon name="x" /> Challenge on X</button><button className="icon-button" onClick={copyResult} aria-label="Copy result"><Icon name="copy" /></button></div><button className="retry-button" onClick={startRun}>DRILL AGAIN</button>{!operator && <button className="claim-after" onClick={openClaim}>Claim an Operator ID to enter ranked play →</button>}</div>}
                 {phase === "playing" && <button className="drill-button" onClick={drill}><span>DRILL</span><small>HIT THE GREEN</small></button>}
@@ -369,8 +507,10 @@ export default function RigyadhClient() {
         </div>
         <div className="leaderboard">
           <div className="leaderboard-head"><span>RANK</span><span>OPERATOR</span><span>FIELD ALIAS</span><span>DEPTH</span><span>RESERVE</span></div>
-          {LEADERS.map((leader) => <div className="leaderboard-row" key={leader.rank}><span className="rank">{leader.rank}</span><span>{leader.operator}</span><strong>{leader.alias}</strong><span>{leader.depth}</span><span>{leader.reserve}</span></div>)}
-          <div className="leaderboard-note"><span /> SIMULATED FIELD DATA — RANKED BOARD ACTIVATES WITH OPERATOR CLAIMS</div>
+          {leaderboardState === "loading" && <div className="leaderboard-note"><span /> LOADING VERIFIED FIELD DATA</div>}
+          {leaderboardState === "ready" && leaders.map((leader) => <div className="leaderboard-row" key={leader.rank}><span className="rank">{String(leader.rank).padStart(2, "0")}</span><span>#{leader.operator}</span><strong>{leader.alias}</strong><span>{formatNumber(leader.depth)}m</span><span>{formatNumber(leader.reserve)}</span></div>)}
+          {leaderboardState === "empty" && <div className="leaderboard-note"><span /> NO VERIFIED RUNS IN THIS FIELD YET</div>}
+          {leaderboardState === "error" && <div className="leaderboard-note"><span /> FIELD BOARD OFFLINE — RETRY SHORTLY</div>}
         </div>
       </section>
 
@@ -381,7 +521,7 @@ export default function RigyadhClient() {
           <div className="identity-main"><div className="operator-avatar"><span /><i /><b>{operator?.number ?? "?"}</b></div><div><small>FIELD ALIAS</small><h3>{operator?.alias ?? "Claim your place"}</h3><p>{operator ? "Identity secured for this simulation." : "Complete a run, then claim a random number from 0001–5555."}</p></div></div>
           <div className="identity-actions">
             {!operator ? <button className="primary-button" onClick={openClaim}>Claim identity <Icon name="arrow" /></button> : <button className="secondary-button" onClick={openClaim}>Identity details</button>}
-            <button className="wallet-button" disabled={!operator} onClick={() => { setWalletLinked(true); setToast("WALLET LINK PREVIEWED"); }}><Icon name="wallet" /> {walletLinked ? "0x71F2…0417" : "Link wallet — optional"}</button>
+            <button className="wallet-button" disabled={!operator} onClick={() => setToast("WALLET VERIFICATION REQUIRES A COMPATIBLE BROWSER WALLET")}><Icon name="wallet" /> {walletLinked ? "WALLET VERIFIED" : "Link wallet — optional"}</button>
           </div>
         </div>
       </section>
@@ -391,9 +531,9 @@ export default function RigyadhClient() {
       {claimOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setClaimOpen(false); }}>
         <div className="claim-modal" role="dialog" aria-modal="true" aria-labelledby="claim-title">
           <button className="modal-close" onClick={() => setClaimOpen(false)} aria-label="Close claim dialog">×</button><p className="eyebrow"><span /> CLAIM PROTOCOL</p>
-          {authStep === "options" && <><h2 id="claim-title">Enter the ranked field.</h2><p>Secure one permanent Operator ID. No wallet required.</p><div className="auth-options"><button onClick={() => setAuthStep("alias")}><Icon name="google" /><span><strong>Continue with Google</strong><small>Fastest route to the field</small></span><b>→</b></button><button onClick={() => setAuthStep("email")}><Icon name="mail" /><span><strong>Continue with magic link</strong><small>No password to remember</small></span><b>→</b></button></div><small className="prototype-note">Prototype flow: no live identity will be reserved.</small></>}
+          {authStep === "options" && <><h2 id="claim-title">Enter the ranked field.</h2><p>Secure one permanent Operator ID. No wallet required.</p><div className="auth-options"><button onClick={continueWithGoogle}><Icon name="google" /><span><strong>Continue with Google</strong><small>Fastest route to the field</small></span><b>→</b></button><button onClick={() => setAuthStep("email")}><Icon name="mail" /><span><strong>Continue with magic link</strong><small>No password to remember</small></span><b>→</b></button></div></>}
           {authStep === "email" && <form onSubmit={sendMagicLink}><button type="button" className="back-button" onClick={() => setAuthStep("options")}>← Back</button><h2 id="claim-title">Receive the signal.</h2><p>We’ll send a single-use sign-in link to your inbox.</p><label>Email address<input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="operator@example.com" autoFocus /></label><button className="primary-button" type="submit">Send magic link <Icon name="arrow" /></button></form>}
-          {authStep === "sent" && <><div className="sent-mark"><Icon name="mail" /></div><h2 id="claim-title">Transmission sent.</h2><p>Check <strong>{email}</strong>. The link will return you to your Operator claim.</p><button className="secondary-button full" onClick={() => setAuthStep("alias")}>Preview verified state</button></>}
+          {authStep === "sent" && <><div className="sent-mark"><Icon name="mail" /></div><h2 id="claim-title">Transmission sent.</h2><p>Check <strong>{email}</strong>. The link will return you to your Operator claim.</p><button className="secondary-button full" onClick={() => setClaimOpen(false)}>Return to field</button></>}
           {authStep === "alias" && <form onSubmit={completeClaim}><h2 id="claim-title">Name your operator.</h2><p>Your number is random and permanent. Your Field Alias is yours.</p><label>Field Alias<input value={alias} onChange={(event) => setAlias(event.target.value)} minLength={3} maxLength={16} placeholder="DESERTMO" autoFocus /><small>3–16 letters, numbers, dashes or underscores.</small></label><div className="number-preview"><span>RANDOM ASSIGNMENT</span><strong>#????</strong></div><button className="primary-button" type="submit">Bring rig online <Icon name="arrow" /></button></form>}
           {authStep === "claimed" && operator && <><div className="claimed-number"><small>OPERATOR</small><strong>#{operator.number}</strong></div><h2 id="claim-title">{operator.alias} is online.</h2><p>Your practice identity is ready. Link a wallet later from your profile if you want holder verification.</p><button className="primary-button full" onClick={() => { setClaimOpen(false); document.querySelector("#profile")?.scrollIntoView({ behavior: "smooth" }); }}>View profile <Icon name="arrow" /></button></>}
         </div>
