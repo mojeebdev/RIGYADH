@@ -3,6 +3,7 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { authClient } from "@/lib/auth/client";
+import { parseAuthReturn } from "@/lib/auth-return";
 import { SiteFooter, SiteHeader } from "@/app/site-chrome";
 
 type Phase = "idle" | "playing" | "checkpoint" | "ended";
@@ -35,6 +36,7 @@ const EMPTY_RUN: RunStats = {
 
 type Leader = { rank: number; operator: string; alias: string; depth: number; reserve: number };
 type OperatorProfile = { number: string; alias: string; walletAddress?: string | null };
+type AuthUser = { id: string; email: string; name?: string | null };
 type FieldState = { date: string; closesAt: string; claimedCount: number };
 type VerifiedResult = {
   id: string;
@@ -94,6 +96,10 @@ export default function RigyadhClient({ view = "home" }: { view?: RigyadhView })
   const [email, setEmail] = useState("");
   const [alias, setAlias] = useState("DESERTMO");
   const [operator, setOperator] = useState<OperatorProfile | null>(null);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [reservedNumber, setReservedNumber] = useState<string | null>(null);
   const [walletBusy, setWalletBusy] = useState(false);
   const [walletInput, setWalletInput] = useState("");
   const [toast, setToast] = useState("");
@@ -110,6 +116,7 @@ export default function RigyadhClient({ view = "home" }: { view?: RigyadhView })
   const randomRef = useRef<() => number>(Math.random);
   const rankedSessionRef = useRef<{ token: string; startedAt: number } | null>(null);
   const rankedActionsRef = useRef<{ type: "drill" | "bank" | "max"; atMs: number }[]>([]);
+  const claimRequestRef = useRef(false);
 
   const loadLeaderboard = useCallback(async () => {
     try {
@@ -379,14 +386,54 @@ export default function RigyadhClient({ view = "home" }: { view?: RigyadhView })
   };
 
   const refreshOperator = async () => {
-    const response = await fetch("/api/operators/me");
-    if (!response.ok) return null;
+    const response = await fetch("/api/operators/me", { cache: "no-store" });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+      throw new Error(payload?.error?.message ?? "Operator profile is unavailable.");
+    }
     const payload = await response.json() as { operator: { number: number; fieldAlias: string; walletAddress?: string | null } | null; attemptsRemaining?: number };
     if (typeof payload.attemptsRemaining === "number") setAttemptsRemaining(payload.attemptsRemaining);
     if (!payload.operator) return null;
     const nextOperator = { number: String(payload.operator.number).padStart(4, "0"), alias: payload.operator.fieldAlias, walletAddress: payload.operator.walletAddress };
     setOperator(nextOperator);
     return nextOperator;
+  };
+
+  const refreshAuthSession = async () => {
+    const { data, error } = await authClient.getSession();
+    if (error) throw new Error(error.message ?? "Authentication session is unavailable.");
+    const user = data?.user
+      ? { id: data.user.id, email: data.user.email, name: data.user.name }
+      : null;
+    setAuthUser(user);
+    return user;
+  };
+
+  const reserveIdentity = async () => {
+    const response = await fetch("/api/operators/reserve", { method: "POST" });
+    const payload = await response.json().catch(() => null) as {
+      status?: "reserved" | "claimed";
+      reservation?: { number: string };
+      operator?: { number: number; fieldAlias: string; walletAddress?: string | null };
+      error?: { message?: string };
+    } | null;
+    if (!response.ok) throw new Error(payload?.error?.message ?? "Operator reservation unavailable.");
+
+    if (payload?.status === "claimed" && payload.operator) {
+      const existing = {
+        number: String(payload.operator.number).padStart(4, "0"),
+        alias: payload.operator.fieldAlias,
+        walletAddress: payload.operator.walletAddress,
+      };
+      setOperator(existing);
+      setAuthStep("claimed");
+      setClaimOpen(true);
+      return;
+    }
+    if (!payload?.reservation?.number) throw new Error("Operator reservation was not returned.");
+    setReservedNumber(payload.reservation.number);
+    setAuthStep("alias");
+    setClaimOpen(true);
   };
 
   const saveWallet = async (event: FormEvent) => {
@@ -414,78 +461,175 @@ export default function RigyadhClient({ view = "home" }: { view?: RigyadhView })
   };
 
   const openClaim = async () => {
-    const existing = await refreshOperator();
-    if (existing) {
-      setAuthStep("claimed");
-      setClaimOpen(true);
-      return;
+    if (claimRequestRef.current) return;
+    claimRequestRef.current = true;
+    setAuthBusy(true);
+    try {
+      const user = await refreshAuthSession();
+      if (!user) {
+        setAuthStep("options");
+        setClaimOpen(true);
+        return;
+      }
+      const existing = await refreshOperator();
+      if (existing) {
+        setAuthStep("claimed");
+        setClaimOpen(true);
+        return;
+      }
+      await reserveIdentity();
+    } catch (error) {
+      setToast(error instanceof Error ? error.message.toUpperCase() : "CLAIM FLOW UNAVAILABLE");
+    } finally {
+      claimRequestRef.current = false;
+      setAuthBusy(false);
     }
-    const reservation = await fetch("/api/operators/reserve", { method: "POST" });
-    if (reservation.status === 401) {
-      setAuthStep("options");
-      setClaimOpen(true);
-      return;
-    }
-    if (!reservation.ok) {
-      const payload = await reservation.json().catch(() => null) as { error?: { message?: string } } | null;
-      setToast(payload?.error?.message ?? "OPERATOR RESERVATION UNAVAILABLE");
-      return;
-    }
-    setAuthStep("alias");
-    setClaimOpen(true);
   };
 
   const sendMagicLink = async (event: FormEvent) => {
     event.preventDefault();
-    if (!email.trim()) return;
-    const { error } = await authClient.signIn.magicLink({
-      email: email.trim(),
-      callbackURL: window.location.origin + "/operator",
-    });
-    if (error) {
-      setToast("MAGIC LINK COULD NOT BE SENT");
-      return;
+    if (!email.trim() || authBusy) return;
+    setAuthBusy(true);
+    try {
+      const { error } = await authClient.signIn.magicLink({
+        email: email.trim(),
+        callbackURL: "/operator?claim=1",
+        errorCallbackURL: "/operator?auth_error=magic-link",
+      });
+      if (error) throw new Error(error.message ?? "Magic link could not be sent.");
+      setAuthStep("sent");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message.toUpperCase() : "MAGIC LINK COULD NOT BE SENT");
+    } finally {
+      setAuthBusy(false);
     }
-    setAuthStep("sent");
   };
 
   const completeClaim = async (event: FormEvent) => {
     event.preventDefault();
+    if (authBusy) return;
     const cleaned = alias.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "").slice(0, 16);
     if (cleaned.length < 3) return;
-    const response = await fetch("/api/operators/claim", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ alias: cleaned }),
-    });
-    const payload = await response.json().catch(() => null) as { operator?: { number: number; fieldAlias: string }; error?: { message?: string } } | null;
-    if (!response.ok || !payload?.operator) {
-      setToast(payload?.error?.message ?? "FIELD ALIAS UNAVAILABLE");
-      return;
+    setAuthBusy(true);
+    try {
+      const response = await fetch("/api/operators/claim", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ alias: cleaned }),
+      });
+      const payload = await response.json().catch(() => null) as { operator?: { number: number; fieldAlias: string }; error?: { code?: string; message?: string } } | null;
+      if (!response.ok || !payload?.operator) {
+        if (payload?.error?.code === "RESERVATION_REQUIRED") {
+          await reserveIdentity();
+          setToast("RESERVATION REFRESHED — CONFIRM YOUR ALIAS AGAIN");
+          return;
+        }
+        throw new Error(payload?.error?.message ?? "Field alias unavailable.");
+      }
+      const claimed = { number: String(payload.operator.number).padStart(4, "0"), alias: payload.operator.fieldAlias };
+      setOperator(claimed);
+      setReservedNumber(null);
+      setAuthStep("claimed");
+      setToast("OPERATOR #" + claimed.number + " IS ONLINE");
+      void loadField();
+      void loadLeaderboard();
+    } catch (error) {
+      setToast(error instanceof Error ? error.message.toUpperCase() : "FIELD ALIAS UNAVAILABLE");
+    } finally {
+      setAuthBusy(false);
     }
-    const claimed = { number: String(payload.operator.number).padStart(4, "0"), alias: payload.operator.fieldAlias };
-    setOperator(claimed);
-    setAuthStep("claimed");
-    setToast("OPERATOR #" + claimed.number + " IS ONLINE");
-    void loadLeaderboard();
   };
 
   const continueWithGoogle = async () => {
-    const { error } = await authClient.signIn.social({
-      provider: "google",
-      callbackURL: window.location.origin + "/operator",
-    });
-    if (error) setToast("GOOGLE SIGN-IN UNAVAILABLE");
+    if (authBusy) return;
+    setAuthBusy(true);
+    try {
+      const { error } = await authClient.signIn.social({
+        provider: "google",
+        callbackURL: "/operator?claim=1",
+        newUserCallbackURL: "/operator?claim=1",
+        errorCallbackURL: "/operator?auth_error=google",
+      });
+      if (error) throw new Error(error.message ?? "Google sign-in unavailable.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message.toUpperCase() : "GOOGLE SIGN-IN UNAVAILABLE");
+      setAuthBusy(false);
+    }
+  };
+
+  const signOut = async () => {
+    if (authBusy) return;
+    setAuthBusy(true);
+    try {
+      const { error } = await authClient.signOut();
+      if (error) throw new Error(error.message ?? "Sign out failed.");
+      setAuthUser(null);
+      setOperator(null);
+      setReservedNumber(null);
+      setAuthStep("options");
+      setToast("SIGNED OUT");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message.toUpperCase() : "SIGN OUT FAILED");
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void refreshOperator();
-      void loadLeaderboard();
+    let cancelled = false;
+    const bootstrap = async () => {
+      const authReturn = parseAuthReturn(window.location.search, window.location.pathname);
+      const resumeClaim = view === "operator" && authReturn.resumeClaim;
+      const authError = authReturn.authError;
+      if (resumeClaim) {
+        claimRequestRef.current = true;
+        setAuthBusy(true);
+      }
+      try {
+        const user = await refreshAuthSession();
+        if (cancelled) return;
+        if (user) {
+          const existing = await refreshOperator();
+          if (cancelled) return;
+          if (resumeClaim) {
+            if (existing) {
+              setAuthStep("claimed");
+              setClaimOpen(true);
+            } else {
+              await reserveIdentity();
+            }
+          }
+        } else if (resumeClaim) {
+          setAuthStep("options");
+          setClaimOpen(true);
+        }
+      } catch (error) {
+        if (!cancelled) setToast(error instanceof Error ? error.message.toUpperCase() : "AUTHENTICATION UNAVAILABLE");
+      } finally {
+        if (!cancelled) {
+          claimRequestRef.current = false;
+          setAuthBusy(false);
+          setAuthReady(true);
+          if (authError) {
+            setAuthStep("options");
+            setClaimOpen(true);
+            setToast("SIGN-IN WAS NOT COMPLETED — PLEASE TRY AGAIN");
+          }
+          if (authReturn.hasAuthReturn) window.history.replaceState(window.history.state, "", authReturn.cleanPath);
+        }
+      }
+    };
+
+    void bootstrap();
+    const initialDataTimer = window.setTimeout(() => {
       void loadField();
+      if (view === "leaderboard" || view === "practice") void loadLeaderboard();
     }, 0);
-    return () => window.clearTimeout(timer);
-    // Initial hydration only; the individual loaders expose their own explicit refresh paths.
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initialDataTimer);
+    };
+    // Initial page hydration; callback handling deliberately runs once per route load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -495,7 +639,7 @@ export default function RigyadhClient({ view = "home" }: { view?: RigyadhView })
       <SiteHeader status={
         <Link className="status-button" href="/operator">
           <span className="status-light" />
-          {operator ? `#${operator.number}` : field ? `${formatNumber(field.claimedCount)} / 5,555 CLAIMED` : "RANKED ACCESS"}
+          {operator ? `#${operator.number}` : authUser ? "SIGNED IN" : field ? `${formatNumber(field.claimedCount)} / 5,555 CLAIMED` : "RANKED ACCESS"}
         </Link>
       } />
 
@@ -541,7 +685,7 @@ export default function RigyadhClient({ view = "home" }: { view?: RigyadhView })
 
       {view === "practice" && <section className="game-section page-section" id="game">
         <div className="section-heading">
-          <div><p className="eyebrow"><span /> LIVE SIMULATION</p><h2>Pressure control</h2></div>
+          <div><p className="eyebrow"><span /> LIVE SIMULATION</p><h1>Pressure control</h1></div>
           <p>Tap inside the extraction window. Miss three times and the unbanked reserve is gone.</p>
         </div>
 
@@ -595,7 +739,7 @@ export default function RigyadhClient({ view = "home" }: { view?: RigyadhView })
 
       {view === "leaderboard" && <section className="leaderboard-section page-section" id="leaderboard">
         <div className="section-heading compact">
-          <div><p className="eyebrow"><span /> DAILY FIELD</p><h2>Top operators</h2></div>
+          <div><p className="eyebrow"><span /> DAILY FIELD</p><h1>Top operators</h1></div>
           <div className="reset-clock"><span>NEXT FIELD</span><strong>{fieldCountdown}</strong></div>
         </div>
         <div className="leaderboard">
@@ -608,13 +752,14 @@ export default function RigyadhClient({ view = "home" }: { view?: RigyadhView })
       </section>}
 
       {view === "operator" && <section className="profile-section page-section" id="profile">
-        <div className="profile-copy"><p className="eyebrow"><span /> OPERATOR IDENTITY</p><h2>One number.<br />One field record.</h2><p>Practice is open. Ranked access belongs to 5,555 permanent Operator IDs—claimed with Google or a magic link. Wallets stay optional.</p></div>
+        <div className="profile-copy"><p className="eyebrow"><span /> OPERATOR IDENTITY</p><h1>One number.<br />One field record.</h1><p>Practice is open. Ranked access belongs to 5,555 permanent Operator IDs—claimed with Google or a magic link. Wallets stay optional.</p></div>
         <div className="identity-card">
-          <div className="identity-top"><span>{operator ? `OPERATOR #${operator.number}` : "UNCLAIMED SIGNAL"}</span><i className={operator ? "active" : ""}>{operator ? "ONLINE" : "OFFLINE"}</i></div>
-          <div className="identity-main"><div className="operator-avatar"><span /><i /><b>{operator?.number ?? "?"}</b></div><div><small>FIELD ALIAS</small><h3>{operator?.alias ?? "Claim your place"}</h3><p>{operator ? `Permanent identity secured. ${attemptsRemaining} ranked attempt${attemptsRemaining === 1 ? "" : "s"} remain in today's field.` : "Sign in, then claim a random permanent number from 0001–5555."}</p></div></div>
+          <div className="identity-top"><span>{operator ? `OPERATOR #${operator.number}` : authUser ? "ACCOUNT AUTHENTICATED" : "UNCLAIMED SIGNAL"}</span><i className={operator || authUser ? "active" : ""}>{operator ? "ONLINE" : authUser ? "READY TO CLAIM" : authReady ? "OFFLINE" : "SYNCING"}</i></div>
+          <div className="identity-main"><div className="operator-avatar"><span /><i /><b>{operator?.number ?? "?"}</b></div><div><small>{operator ? "FIELD ALIAS" : authUser ? "SIGNED-IN ACCOUNT" : "FIELD ALIAS"}</small><h3>{operator?.alias ?? (authUser ? authUser.name || "Signal received" : "Claim your place")}</h3><p>{operator ? `Permanent identity secured. ${attemptsRemaining} ranked attempt${attemptsRemaining === 1 ? "" : "s"} remain in today's field.` : authUser ? `${authUser.email} is authenticated. Complete the claim to receive a permanent random number.` : "Sign in, then claim a random permanent number from 0001–5555."}</p></div></div>
           <div className="identity-actions">
-            {!operator ? <button className="primary-button" onClick={openClaim}>Claim identity <Icon name="arrow" /></button> : <button className="secondary-button" onClick={openClaim}>Identity details</button>}
+            {!operator ? <button className="primary-button" onClick={openClaim} disabled={authBusy || !authReady}>{!authReady || authBusy ? "Checking signal…" : authUser ? "Complete identity" : "Claim identity"} <Icon name="arrow" /></button> : <button className="secondary-button" onClick={openClaim} disabled={authBusy}>Identity details</button>}
             {operator && <Link className="wallet-button" href="/practice">Enter ranked field <Icon name="arrow" /></Link>}
+            {authUser && <button className="wallet-button" onClick={signOut} disabled={authBusy}>Sign out</button>}
           </div>
           {operator && <div className="wallet-profile">
             <div><small>PROFILE WALLET // OPTIONAL</small><p>{operator.walletAddress ?? "Paste a public EVM address. No wallet connection or signature is requested."}</p></div>
@@ -629,10 +774,10 @@ export default function RigyadhClient({ view = "home" }: { view?: RigyadhView })
       {claimOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setClaimOpen(false); }}>
         <div className="claim-modal" role="dialog" aria-modal="true" aria-labelledby="claim-title">
           <button className="modal-close" onClick={() => setClaimOpen(false)} aria-label="Close claim dialog">×</button><p className="eyebrow"><span /> CLAIM PROTOCOL</p>
-          {authStep === "options" && <><h2 id="claim-title">Enter the ranked field.</h2><p>Secure one permanent Operator ID. No wallet required.</p><div className="auth-options"><button onClick={continueWithGoogle}><Icon name="google" /><span><strong>Continue with Google</strong><small>Fastest route to the field</small></span><b>→</b></button><button onClick={() => setAuthStep("email")}><Icon name="mail" /><span><strong>Continue with magic link</strong><small>No password to remember</small></span><b>→</b></button></div></>}
-          {authStep === "email" && <form onSubmit={sendMagicLink}><button type="button" className="back-button" onClick={() => setAuthStep("options")}>← Back</button><h2 id="claim-title">Receive the signal.</h2><p>We’ll send a single-use sign-in link to your inbox.</p><label>Email address<input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="operator@example.com" autoFocus /></label><button className="primary-button" type="submit">Send magic link <Icon name="arrow" /></button></form>}
+          {authStep === "options" && <><h2 id="claim-title">Enter the ranked field.</h2><p>Secure one permanent Operator ID. No wallet required.</p><div className="auth-options"><button onClick={continueWithGoogle} disabled={authBusy}><Icon name="google" /><span><strong>{authBusy ? "Opening Google…" : "Continue with Google"}</strong><small>Fastest route to the field</small></span><b>→</b></button><button onClick={() => setAuthStep("email")} disabled={authBusy}><Icon name="mail" /><span><strong>Continue with magic link</strong><small>No password to remember</small></span><b>→</b></button></div></>}
+          {authStep === "email" && <form onSubmit={sendMagicLink}><button type="button" className="back-button" onClick={() => setAuthStep("options")} disabled={authBusy}>← Back</button><h2 id="claim-title">Receive the signal.</h2><p>We’ll send a single-use sign-in link to your inbox.</p><label>Email address<input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="operator@example.com" autoFocus disabled={authBusy} /></label><button className="primary-button" type="submit" disabled={authBusy}>{authBusy ? "Sending…" : "Send magic link"} <Icon name="arrow" /></button></form>}
           {authStep === "sent" && <><div className="sent-mark"><Icon name="mail" /></div><h2 id="claim-title">Transmission sent.</h2><p>Check <strong>{email}</strong>. The link will return you to your Operator claim.</p><button className="secondary-button full" onClick={() => setClaimOpen(false)}>Return to field</button></>}
-          {authStep === "alias" && <form onSubmit={completeClaim}><h2 id="claim-title">Name your operator.</h2><p>Your number is random and permanent. Your Field Alias is yours.</p><label>Field Alias<input value={alias} onChange={(event) => setAlias(event.target.value)} minLength={3} maxLength={16} placeholder="DESERTMO" autoFocus /><small>3–16 letters, numbers, dashes or underscores.</small></label><div className="number-preview"><span>RANDOM ASSIGNMENT</span><strong>#????</strong></div><button className="primary-button" type="submit">Bring rig online <Icon name="arrow" /></button></form>}
+          {authStep === "alias" && <form onSubmit={completeClaim}><h2 id="claim-title">Name your operator.</h2><p>Your number is random and permanent. Your Field Alias is yours.</p><label>Field Alias<input value={alias} onChange={(event) => setAlias(event.target.value)} minLength={3} maxLength={16} placeholder="DESERTMO" autoFocus disabled={authBusy} /><small>3–16 letters, numbers, dashes or underscores.</small></label><div className="number-preview"><span>RANDOM ASSIGNMENT</span><strong>#{reservedNumber ?? "????"}</strong></div><button className="primary-button" type="submit" disabled={authBusy}>{authBusy ? "Bringing rig online…" : "Bring rig online"} <Icon name="arrow" /></button></form>}
           {authStep === "claimed" && operator && <><div className="claimed-number"><small>OPERATOR</small><strong>#{operator.number}</strong></div><h2 id="claim-title">{operator.alias} is online.</h2><p>Your permanent Operator identity is ready. A public wallet address can be added manually from this authenticated profile.</p><button className="primary-button full" onClick={() => { setClaimOpen(false); document.querySelector("#profile")?.scrollIntoView({ behavior: "smooth" }); }}>View profile <Icon name="arrow" /></button></>}
         </div>
       </div>}

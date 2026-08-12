@@ -35,7 +35,9 @@ The seed command is idempotent and inserts exactly the fixed operator range 1–
 
 Deploy the Next.js app to Netlify and configure the same server variables there. For production, set NEXT_PUBLIC_APP_URL to https://rigyadh.buzz.
 
-In Neon Auth, add https://rigyadh.buzz as a trusted domain and disable Allow Localhost for the production environment. Before launch, enable email verification and replace shared Google keys with your own Google OAuth credentials.
+In Neon Auth, add https://rigyadh.buzz as a trusted domain and disable Allow Localhost for the production environment. Configure production Google OAuth with `{NEON_AUTH_BASE_URL}/callback/google` as the authorized redirect URI, and configure production email delivery for magic links. `NEON_AUTH_COOKIE_SECRET` must be stable and at least 32 characters.
+
+Google and magic-link callbacks return to `/operator?claim=1`. The client refreshes the Neon session before calling protected Operator APIs, then automatically resumes the pending random-number claim. Do not call application APIs to infer auth state; use `authClient.getSession()` in the browser or `auth.getSession()` on the server.
 
 Daily fields rotate automatically at 00:00 UTC; the server derives and stores each day’s seed the first time it is requested.
 

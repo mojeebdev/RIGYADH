@@ -3,6 +3,12 @@
   --font-mono: "Courier New", Courier, monospace;
 }
 
+button:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .wallet-profile {
   display: grid;
   gap: 14px;

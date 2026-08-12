@@ -15,7 +15,9 @@ export async function GET() {
     if (!userId) return jsonError("Sign in to view an operator.", 401, "AUTH_REQUIRED");
 
     const operator = await getOperatorForUser(userId);
-    if (!operator) return NextResponse.json({ operator: null, attemptsRemaining: 3 });
+    if (!operator) return NextResponse.json({ operator: null, attemptsRemaining: 3 }, {
+      headers: { "Cache-Control": "private, no-store" },
+    });
     const field = await getTodayField();
     const [attempts] = await getDb().select({ count: sql<number>`count(*)::int` })
       .from(rankedRunSessions)
@@ -23,7 +25,9 @@ export async function GET() {
         eq(rankedRunSessions.operatorId, operator.id),
         eq(rankedRunSessions.dailyFieldId, field.id),
       ));
-    return NextResponse.json({ operator, attemptsRemaining: Math.max(0, 3 - (attempts?.count ?? 0)) });
+    return NextResponse.json({ operator, attemptsRemaining: Math.max(0, 3 - (attempts?.count ?? 0)) }, {
+      headers: { "Cache-Control": "private, no-store" },
+    });
   } catch {
     return jsonError("Operator profile is unavailable.", 503, "SERVICE_UNAVAILABLE");
   }
