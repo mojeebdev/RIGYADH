@@ -2,9 +2,42 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import "./secondary.css";
+import "./credits.css";
 
 const sans = Geist({ variable: "--font-sans", subsets: ["latin"] });
 const mono = Geist_Mono({ variable: "--font-mono", subsets: ["latin"] });
+
+const structuredData = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Person",
+      "@id": "https://blindspotlab.xyz/#mojeeb-titilayo",
+      name: "Mojeeb Titilayo",
+      url: "https://github.com/mojeebdev",
+      sameAs: ["https://github.com/mojeebdev"],
+    },
+    {
+      "@type": "Organization",
+      "@id": "https://blindspotlab.xyz/#organization",
+      name: "BlindspotLab",
+      url: "https://blindspotlab.xyz",
+      founder: { "@id": "https://blindspotlab.xyz/#mojeeb-titilayo" },
+    },
+    {
+      "@type": "VideoGame",
+      "@id": "#rigyadh",
+      name: "RIGYADH",
+      description:
+        "A competitive push-your-luck drilling game for The Saudis community.",
+      genre: ["Arcade", "Strategy", "Community Game"],
+      playMode: "SinglePlayer",
+      isAccessibleForFree: true,
+      creator: { "@id": "https://blindspotlab.xyz/#mojeeb-titilayo" },
+      publisher: { "@id": "https://blindspotlab.xyz/#organization" },
+    },
+  ],
+};
 
 export const metadata: Metadata = {
   title: "RIGYADH — 5,555 rigs. One field.",
@@ -32,7 +65,13 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={`${sans.variable} ${mono.variable}`}>{children}</body>
+      <body className={`${sans.variable} ${mono.variable}`}>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }}
+        />
+        {children}
+      </body>
     </html>
   );
 }

@@ -386,7 +386,7 @@ export default function RigyadhClient() {
         </div>
       </section>
 
-      <footer><a className="wordmark" href="#top"><span className="wordmark-mark"><i /><i /><i /></span><span>RIGYADH</span></a><p>AN INDEPENDENT COMMUNITY GAME CONCEPT.<br />NOT AFFILIATED WITH ROBINHOOD OR THE SAUDIS.</p><div><a href="#game">PRACTICE</a><a href="#leaderboard">FIELD BOARD</a><a href="#profile">OPERATOR</a></div></footer>
+      <footer><a className="wordmark" href="#top"><span className="wordmark-mark"><i /><i /><i /></span><span>RIGYADH</span></a><p>AN INDEPENDENT COMMUNITY GAME BY <a className="studio-credit" href="https://blindspotlab.xyz" target="_blank" rel="noreferrer">BLINDSPOTLAB</a>.<br />NOT AFFILIATED WITH ROBINHOOD OR THE SAUDIS.</p><div><a href="#game">PRACTICE</a><a href="#leaderboard">FIELD BOARD</a><a href="#profile">OPERATOR</a></div></footer>
 
       {claimOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setClaimOpen(false); }}>
         <div className="claim-modal" role="dialog" aria-modal="true" aria-labelledby="claim-title">

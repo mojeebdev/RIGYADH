@@ -1,0 +1,11 @@
+footer .studio-credit {
+  color: var(--sand);
+  text-decoration: underline;
+  text-decoration-color: #65513a;
+  text-underline-offset: 3px;
+}
+
+footer .studio-credit:hover {
+  color: var(--signal);
+  text-decoration-color: var(--signal);
+}
