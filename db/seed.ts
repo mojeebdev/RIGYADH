@@ -8,4 +8,7 @@ async function seed() {
   ));
 }
 
-await seed();
+seed().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
