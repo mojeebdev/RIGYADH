@@ -309,7 +309,8 @@ export default function RigyadhClient() {
   const shareResult = () => {
     const identity = operator ? `Operator #${operator.number}` : "Unranked driller";
     const text = `RIGYADH field report // ${identity}\n\nDepth: ${formatNumber(stats.depth)}m\nReserves: ${formatNumber(totalReserve)}\n\nI banked the signal. Can you drill deeper?\n\n#RIGYADH`;
-    window.open(`https://x.com/intent/post?text=${encodeURIComponent(text)}`, "_blank", "noopener,noreferrer");
+    const quoteUrl = "https://x.com/MojeebMotion/status/2087677756494524721";
+    window.open(`https://x.com/intent/quote?url=${encodeURIComponent(quoteUrl)}&text=${encodeURIComponent(text)}`, "_blank", "noopener,noreferrer");
   };
 
   const copyResult = async () => {
