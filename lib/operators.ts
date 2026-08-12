@@ -30,8 +30,7 @@ export async function reserveOperatorSlot(userId: string) {
 
   const result = await db.execute(sql`
     WITH expired_claims AS (
-      UPDATE operator_claims
-      SET status = 'expired'
+      DELETE FROM operator_claims
       WHERE status = 'reserved' AND expires_at <= now()
       RETURNING slot_number
     ),

@@ -51,8 +51,11 @@ export async function POST(request: NextRequest) {
 
     const verified = replayRankedRun(session.seed, payload.actions);
     if (!verified.valid) return jsonError(verified.reason ?? "Run could not be reproduced.", 422, "RUN_REJECTED");
+    if (verified.integrity > 0 && Date.now() < session.startedAt.getTime() + 44_000) {
+      return jsonError("The ranked field is still active.", 409, "RUN_STILL_ACTIVE");
+    }
 
-    await db.insert(rankedRuns).values({
+    const [createdRun] = await db.insert(rankedRuns).values({
       sessionId: session.id,
       operatorId: operator.id,
       dailyFieldId: session.dailyFieldId,
@@ -63,13 +66,13 @@ export async function POST(request: NextRequest) {
       bestCombo: verified.bestCombo,
       strikes: verified.strikes,
       actionLog: payload.actions,
-    });
+    }).returning({ id: rankedRuns.id });
     await db.update(rankedRunSessions).set({
       status: "submitted",
       submittedAt: new Date(),
     }).where(eq(rankedRunSessions.id, session.id));
 
-    return NextResponse.json({ run: verified }, { status: 201 });
+    return NextResponse.json({ run: { ...verified, id: createdRun.id } }, { status: 201 });
   } catch (error) {
     if (error instanceof Error && error.message === "RATE_LIMITED") {
       return jsonError("Too many submission attempts. Try again later.", 429, "RATE_LIMITED");
